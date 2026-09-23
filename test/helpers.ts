@@ -8,6 +8,7 @@ export function makePlayers(n: number): Player[] {
     name: `Player ${i + 1}`,
     active: true,
     gamesCredit: 0,
+    sitCredit: 0,
     playNext: false,
   }));
 }

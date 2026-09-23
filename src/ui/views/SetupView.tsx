@@ -131,7 +131,7 @@ function PlayersCard() {
         ))}
       </ul>
       {s.rounds.some((r) => r.status !== 'preview') && (
-        <p class="small muted">Players who join late are credited to the field's lowest games count and play next. Players with matches can be marked out but not removed.</p>
+        <p class="small muted">Players who join late or come back are brought level with the field and play next; sit-outs only count rounds they were here for. Players with matches can be marked out but not removed.</p>
       )}
     </div>
   );

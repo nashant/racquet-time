@@ -88,7 +88,7 @@ describe('localStorage persistence', () => {
   it('runs migrations from older versions and keeps a pre-migration copy', () => {
     migrations[0] = (d) => ({ ...d, session: null, undo: [], migratedFrom0: true });
     try {
-      expect(migrate({ version: 0 })).toMatchObject({ version: 1, migratedFrom0: true });
+      expect(migrate({ version: 0 })).toMatchObject({ version: 2, migratedFrom0: true });
       const storage = new MemoryStorage();
       storage.setItem(STORAGE_KEY, JSON.stringify({ version: 0 }));
       expect(load(storage).warning).toBeUndefined();
@@ -98,13 +98,32 @@ describe('localStorage persistence', () => {
     }
   });
 
+  it('upgrades v1 saved data (players without sitCredit) to v2 without losing anything', () => {
+    const current = fullSession();
+    const strip = (s: Session) => ({ ...s, players: s.players.map(({ sitCredit: _drop, ...p }) => p) });
+    const v1 = { version: 1, session: strip(current), undo: [strip(current)], prefs: { theme: 'dark', sound: false } };
+    const storage = new MemoryStorage();
+    storage.setItem(STORAGE_KEY, JSON.stringify(v1));
+    const { state, warning } = load(storage);
+    expect(warning).toBeUndefined();
+    expect(state.version).toBe(2);
+    expect(state.session!.players.every((p) => p.sitCredit === 0)).toBe(true);
+    expect(state.session!.rounds).toEqual(current.rounds);
+    expect(state.session!.playoffs).toEqual(current.playoffs);
+    expect(state.undo[0].players.every((p) => p.sitCredit === 0)).toBe(true);
+    expect(state.prefs).toEqual({ theme: 'dark', sound: false });
+    expect(storage.getItem(`${STORAGE_KEY}:pre-v1`)).toBe(JSON.stringify(v1));
+    // A v1 export file imports too.
+    expect(importSession(JSON.stringify({ app: 'racquet-time', version: 1, exportedAt: '', session: strip(current) })).players[0].sitCredit).toBe(0);
+  });
+
   it('trims undo history rather than failing when storage is full', () => {
     const storage = new MemoryStorage();
     const session = fullSession();
     const prefs = { theme: 'auto' as const, sound: true };
-    const size = JSON.stringify({ version: 1, session, undo: [session, session], prefs }).length;
+    const size = JSON.stringify({ version: 2, session, undo: [session, session], prefs }).length;
     storage.quota = size + STORAGE_KEY.length + 10;
-    const result = save(storage, { version: 1, session, undo: Array(10).fill(session), prefs });
+    const result = save(storage, { version: 2, session, undo: Array(10).fill(session), prefs });
     expect(result).toEqual({ ok: true, undoKept: 2 });
   });
 });

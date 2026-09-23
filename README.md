@@ -60,7 +60,18 @@ test/           Vitest suites
 
 Each round is a fixed set of **slots**: court → side → position, plus a bench. `layout.ts` decides the slots first. Courts are filled in the chosen order (doubles first by default). A doubles court that can't get four players runs as singles, or is left empty (configurable).
 
-The scheduler (`src/domain/scheduler.ts`) then assigns active players to slots by minimising a weighted cost computed from the full session history.
+The scheduler (`src/domain/scheduler.ts`) then assigns active players to slots under three kinds of rule.
+
+**Hard rule: sit-outs stay within 1.** Most minus least sit-outs among the players present never exceeds 1. Only rounds a player was present for count. If k players must sit out, anyone below the k-th lowest sit-out count must sit, anyone above it must play, and only players exactly at that count can be swapped with each other. The search never considers any other bench. A manual swap in the preview can still break this; the preview then warns.
+
+**Near-hard rules.** Each break costs 10⁹, far more than all the priorities below combined, so a rule is only broken when every legal round breaks it:
+- no doubles team plays together twice
+- no singles match is repeated (singles meetings are counted separately from doubles opponents)
+- nobody plays a second singles while someone present hasn't had one (the cost is how many singles they're ahead)
+
+These can conflict in bigger groups. For 7 players on 1 doubles + 1 singles court over 6 rounds, every rule holds (tested). With 8–13 players, keeping "singles for everyone first" can occasionally force a repeat that would otherwise be avoidable. Some repeats are mathematically unavoidable, e.g. 11 players on 2 doubles courts for 15 rounds needs 60 teams but only 55 pairs exist.
+
+**Weighted priorities** then pick between the rounds that remain:
 
 | Priority (default order) | Cost for a candidate round |
 |---|---|
@@ -73,9 +84,9 @@ The scheduler (`src/domain/scheduler.ts`) then assigns active players to slots b
 
 Weights come from the priority order (reorderable under **Setup → Advanced**): the i-th of six priorities gets `6^(5−i)`, so higher priorities dominate almost lexicographically.
 
-**Search:** 24 random restarts. Each restart puts the players with the lowest sit-out cost on the bench (with random tie-breaks), shuffles everyone else onto court, and runs 1,500 steps of simulated annealing. Each step swaps two slots, which covers moves between courts, with the bench, between teammates and opponents, and between singles and doubles. The best result then gets an exhaustive pairwise-swap hill-climb. All randomness comes from a seeded PRNG, so the same seed and history always give the same round. The iteration budget is fixed rather than time-based, to keep that determinism. A 30-player, 8-court round takes about 10 ms, and the tests assert it stays under 200 ms.
+**Search:** 24 random restarts. Each restart fills the bench as the sit-out rule requires, picking among interchangeable players by lowest sit-out cost with random tie-breaks, shuffles everyone else onto court, and runs 1,500 steps of simulated annealing. Each step swaps two slots, which covers moves between courts, between teammates and opponents, and between singles and doubles. A swap with the bench is allowed only between two interchangeable players. The best result then gets an exhaustive pairwise-swap hill-climb. All randomness comes from a seeded PRNG, so the same seed and history always give the same round. The iteration budget is fixed rather than time-based, to keep that determinism. A 30-player, 8-court round takes about 20 ms, and the tests assert it stays under 200 ms. The near-hard rules are checked round by round, so a session can't be planned ahead; in exhaustive checks on 8–10 players, every round the scheduler produced had the fewest rule-breaks possible given the rounds before it.
 
-**Late arrivals and withdrawals:** a player added or re-activated mid-session is credited with the lowest games count among active players, so they join level instead of playing every round to catch up. They are also flagged to play next. A player who withdraws mid-round (tap their name) keeps their current score, and later rounds are planned without them.
+**Late arrivals and withdrawals:** a player added or re-activated mid-session is credited with the lowest games count among active players, so they join level instead of playing every round to catch up. Their sit-outs are credited up to the highest count among active players, so they're first in line to play without breaking the within-1 rule. They are also flagged to play next. A player who withdraws mid-round (tap their name) keeps their current score, and later rounds are planned without them.
 
 ## How tie-break playoffs work
 

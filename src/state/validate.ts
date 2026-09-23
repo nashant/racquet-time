@@ -54,7 +54,7 @@ const session: Check = obj({
   id: str,
   name: str,
   date: str,
-  players: arr(obj({ id: str, name: str, active: bool, gamesCredit: num, playNext: bool })),
+  players: arr(obj({ id: str, name: str, active: bool, gamesCredit: num, sitCredit: num, playNext: bool })),
   courts: arr(obj({ id: str, name: str, kind: oneOf('singles', 'doubles') })),
   settings: obj({
     format: obj({ kind: oneOf('timed', 'points') }),

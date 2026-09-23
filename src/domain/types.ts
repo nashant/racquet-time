@@ -8,6 +8,8 @@ export interface Player {
   active: boolean;
   /** Games credited on (re)activation so late arrivals join "at par" with the field. */
   gamesCredit: number;
+  /** Sit-outs credited on (re)activation, so sit-outs are only compared over rounds present. */
+  sitCredit: number;
   /** Set when a player arrives late / returns; cleared once they are put on court. */
   playNext: boolean;
 }
@@ -139,7 +141,7 @@ export interface Session {
   playoffs: Playoff[];
 }
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export interface Prefs {
   theme: 'auto' | 'light' | 'dark';

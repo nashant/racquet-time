@@ -52,7 +52,7 @@ export function addPlayers(s: Session, names: string[]): Session {
     const name = raw.trim();
     if (!name || existing.has(name.toLowerCase())) continue;
     existing.add(name.toLowerCase());
-    const player = { id: uid(), name, active: true, gamesCredit: 0, playNext: false };
+    const player = { id: uid(), name, active: true, gamesCredit: 0, sitCredit: 0, playNext: false };
     next = { ...next, players: [...next.players, player] };
     if (hasStarted(next)) next = activate(next, player.id);
   }
@@ -81,8 +81,8 @@ export function removePlayer(s: Session, id: Id): Session {
 function activate(s: Session, id: Id): Session {
   const players = s.players.map((p) => (p.id === id ? { ...p, active: true } : p));
   if (!hasStarted(s)) return { ...s, players };
-  const credit = activationCredit(players, s.rounds, id);
-  return { ...s, players: players.map((p) => (p.id === id ? { ...p, gamesCredit: credit, playNext: true } : p)) };
+  const { games, sits } = activationCredit(players, s.rounds, id);
+  return { ...s, players: players.map((p) => (p.id === id ? { ...p, gamesCredit: games, sitCredit: sits, playNext: true } : p)) };
 }
 
 /**

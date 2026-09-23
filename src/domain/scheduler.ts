@@ -23,6 +23,13 @@ export interface ProposedMatch {
 
 export type Breakdown = Record<Priority, number>;
 
+/** Rule breaks the scheduler only accepts when every alternative breaks them too. */
+export interface Violations {
+  repeatTeams: number;
+  repeatSingles: number;
+  singlesAhead: number;
+}
+
 export interface Proposal {
   matches: ProposedMatch[];
   sittingOut: Id[];
@@ -30,10 +37,13 @@ export interface Proposal {
   downgraded: Id[];
   cost: number;
   breakdown: Breakdown;
+  violations: Violations;
 }
 
 /** Penalty for breaking an "if avoidable" rule inside the equal-games term. */
 const Q = 50;
+/** Per-violation penalty for the near-hard rules; dwarfs every weighted priority. */
+const HARD = 1e9;
 const RESTARTS = 24;
 const STEPS = 1500;
 
@@ -42,7 +52,10 @@ interface Context {
   n: number;
   eff: Float64Array;
   effMax: number;
+  /** Sit-outs over rounds present, plus any credit from (re)activation. */
+  sits: Float64Array;
   singles: Float64Array;
+  minSingles: number;
   expected: Float64Array;
   satOutLast: Uint8Array;
   singlesLast: Uint8Array;
@@ -51,6 +64,8 @@ interface Context {
   sitAgo: Float64Array;
   partner: Int16Array;
   opp: Int16Array;
+  /** Times two players have met in a singles match. */
+  singlesOpp: Int16Array;
   strength: Float64Array;
   weights: Breakdown;
 }
@@ -61,6 +76,12 @@ interface Layout {
   offsets: number[];
   playing: number;
   singlesRatio: number;
+}
+
+/** Hard rule keeping sit-outs within 1: below the k-th lowest count must sit, above it must play. */
+interface Bench {
+  mustSit: Uint8Array;
+  swappable: Uint8Array;
 }
 
 function played(history: Round[]): Round[] {
@@ -84,7 +105,9 @@ function buildContext(req: ScheduleRequest): Context {
     n,
     eff: new Float64Array(n),
     effMax: 0,
+    sits: new Float64Array(n),
     singles: new Float64Array(n),
+    minSingles: 0,
     expected: new Float64Array(n),
     satOutLast: new Uint8Array(n),
     singlesLast: new Uint8Array(n),
@@ -92,6 +115,7 @@ function buildContext(req: ScheduleRequest): Context {
     sitAgo: new Float64Array(n),
     partner: new Int16Array(n * n),
     opp: new Int16Array(n * n),
+    singlesOpp: new Int16Array(n * n),
     strength: new Float64Array(n),
     weights: weightsFor(req.settings),
   };
@@ -99,6 +123,7 @@ function buildContext(req: ScheduleRequest): Context {
     const i = index.get(p.id);
     if (i === undefined) continue;
     ctx.eff[i] = p.gamesCredit;
+    ctx.sits[i] = p.sitCredit ?? 0;
     ctx.playNext[i] = p.playNext ? 1 : 0;
     ctx.strength[i] = req.strength?.[p.id] ?? 0.5;
   }
@@ -128,16 +153,23 @@ function buildContext(req: ScheduleRequest): Context {
         for (const b of sides[1]) {
           ctx.opp[a * n + b]++;
           ctx.opp[b * n + a]++;
+          if (m.kind === 'singles') {
+            ctx.singlesOpp[a * n + b]++;
+            ctx.singlesOpp[b * n + a]++;
+          }
         }
     }
+    // sittingOut only ever lists active players, so these are sit-outs over rounds present.
     for (const id of round.sittingOut) {
       const i = index.get(id);
       if (i === undefined) continue;
+      ctx.sits[i] += 1;
       ctx.sitAgo[i] = rounds.length - r;
       if (last) ctx.satOutLast[i] = 1;
     }
   });
   ctx.effMax = n ? Math.max(...ctx.eff) : 0;
+  ctx.minSingles = n ? Math.min(...ctx.singles) : 0;
   return ctx;
 }
 
@@ -154,6 +186,19 @@ function layoutFrom(plan: { courtId: Id; kind: CourtKind }[]): Layout {
   return { plan, offsets, playing, singlesRatio: playing ? singlesSlots / playing : 0 };
 }
 
+function benchFor(ctx: Context, benchSize: number): Bench {
+  const mustSit = new Uint8Array(ctx.n);
+  const swappable = new Uint8Array(ctx.n);
+  if (benchSize > 0) {
+    const threshold = [...ctx.sits].sort((a, b) => a - b)[benchSize - 1];
+    for (let i = 0; i < ctx.n; i++) {
+      if (ctx.sits[i] < threshold) mustSit[i] = 1;
+      else if (ctx.sits[i] === threshold) swappable[i] = 1;
+    }
+  }
+  return { mustSit, swappable };
+}
+
 function sitCost(ctx: Context, i: number): number {
   let c = (1 + ctx.effMax - ctx.eff[i]) ** 2;
   if (ctx.satOutLast[i]) c += Q;
@@ -163,7 +208,7 @@ function sitCost(ctx: Context, i: number): number {
 }
 
 /** Cost of an assignment: slots[0..playing) fill the courts in order, the rest sit out. */
-function evaluate(ctx: Context, layout: Layout, slots: Int32Array, breakdown?: Breakdown): number {
+function evaluate(ctx: Context, layout: Layout, slots: Int32Array, breakdown?: Breakdown, violations?: Violations): number {
   const { n, weights } = ctx;
   let games = 0;
   let share = 0;
@@ -171,6 +216,9 @@ function evaluate(ctx: Context, layout: Layout, slots: Int32Array, breakdown?: B
   let partner = 0;
   let opp = 0;
   let skill = 0;
+  let repeatTeams = 0;
+  let repeatSingles = 0;
+  let singlesAhead = 0;
   for (let s = layout.playing; s < slots.length; s++) games += sitCost(ctx, slots[s]);
   for (let k = 0; k < layout.plan.length; k++) {
     const o = layout.offsets[k];
@@ -181,11 +229,18 @@ function evaluate(ctx: Context, layout: Layout, slots: Int32Array, breakdown?: B
       const sPrime = ctx.singles[i] + (isSingles ? 1 : 0);
       const ePrime = ctx.expected[i] + layout.singlesRatio;
       share += (sPrime - ePrime) ** 2;
-      if (isSingles && ctx.singlesLast[i]) consec += 1;
+      if (isSingles) {
+        if (ctx.singlesLast[i]) consec += 1;
+        singlesAhead += ctx.singles[i] - ctx.minSingles;
+      }
     }
-    if (!isSingles) {
-      partner += 2 * ctx.partner[slots[o] * n + slots[o + 1]];
-      partner += 2 * ctx.partner[slots[o + 2] * n + slots[o + 3]];
+    if (isSingles) {
+      repeatSingles += ctx.singlesOpp[slots[o] * n + slots[o + 1]];
+    } else {
+      const p1 = ctx.partner[slots[o] * n + slots[o + 1]];
+      const p2 = ctx.partner[slots[o + 2] * n + slots[o + 3]];
+      partner += 2 * (p1 + p2);
+      repeatTeams += p1 + p2;
     }
     let strA = 0;
     let strB = 0;
@@ -204,7 +259,9 @@ function evaluate(ctx: Context, layout: Layout, slots: Int32Array, breakdown?: B
     breakdown.opponentVariety = opp;
     breakdown.skillBalance = weights.skillBalance ? skill : 0;
   }
+  if (violations) Object.assign(violations, { repeatTeams, repeatSingles, singlesAhead });
   return (
+    HARD * (repeatTeams + repeatSingles + singlesAhead) +
     weights.equalGames * games +
     weights.singlesShare * share +
     weights.noConsecutiveSingles * consec +
@@ -214,17 +271,28 @@ function evaluate(ctx: Context, layout: Layout, slots: Int32Array, breakdown?: B
   );
 }
 
-function initial(ctx: Context, layout: Layout, rand: () => number): Int32Array {
-  const bench = ctx.n - layout.playing;
-  const order = Array.from({ length: ctx.n }, (_, i) => i)
+function initial(ctx: Context, layout: Layout, bench: Bench, rand: () => number): Int32Array {
+  const size = ctx.n - layout.playing;
+  const all = Array.from({ length: ctx.n }, (_, i) => i);
+  const forced = all.filter((i) => bench.mustSit[i]);
+  const choices = all
+    .filter((i) => bench.swappable[i])
     .map((i) => ({ i, c: sitCost(ctx, i) + rand() * 0.5 }))
-    .sort((x, y) => x.c - y.c);
-  const sitters = order.slice(0, bench).map((x) => x.i);
-  const players = shuffle(order.slice(bench).map((x) => x.i), rand);
+    .sort((x, y) => x.c - y.c)
+    .map((x) => x.i);
+  const sitters = [...forced, ...choices.slice(0, size - forced.length)];
+  const sitting = new Set(sitters);
+  const players = shuffle(all.filter((i) => !sitting.has(i)), rand);
   return Int32Array.from([...players, ...sitters]);
 }
 
-function anneal(ctx: Context, layout: Layout, slots: Int32Array, rand: () => number): number {
+/** A swap between court and bench is only allowed between two interchangeable players. */
+function allowed(layout: Layout, bench: Bench, slots: Int32Array, i: number, j: number): boolean {
+  if (i < layout.playing === j < layout.playing) return true;
+  return bench.swappable[slots[i]] === 1 && bench.swappable[slots[j]] === 1;
+}
+
+function anneal(ctx: Context, layout: Layout, bench: Bench, slots: Int32Array, rand: () => number): number {
   const n = slots.length;
   let cost = evaluate(ctx, layout, slots);
   let best = cost;
@@ -235,7 +303,7 @@ function anneal(ctx: Context, layout: Layout, slots: Int32Array, rand: () => num
     const t = t0 * (t1 / t0) ** (step / STEPS);
     const i = Math.floor(rand() * n);
     const j = Math.floor(rand() * n);
-    if (i === j || (i >= layout.playing && j >= layout.playing)) continue;
+    if (i === j || (i >= layout.playing && j >= layout.playing) || !allowed(layout, bench, slots, i, j)) continue;
     [slots[i], slots[j]] = [slots[j], slots[i]];
     const next = evaluate(ctx, layout, slots);
     const delta = next - cost;
@@ -253,12 +321,13 @@ function anneal(ctx: Context, layout: Layout, slots: Int32Array, rand: () => num
   return best;
 }
 
-function hillClimb(ctx: Context, layout: Layout, slots: Int32Array): number {
+function hillClimb(ctx: Context, layout: Layout, bench: Bench, slots: Int32Array): number {
   let cost = evaluate(ctx, layout, slots);
   for (let improved = true; improved; ) {
     improved = false;
     for (let i = 0; i < layout.playing; i++)
       for (let j = i + 1; j < slots.length; j++) {
+        if (!allowed(layout, bench, slots, i, j)) continue;
         [slots[i], slots[j]] = [slots[j], slots[i]];
         const next = evaluate(ctx, layout, slots);
         if (next < cost - 1e-9) {
@@ -274,7 +343,8 @@ function hillClimb(ctx: Context, layout: Layout, slots: Int32Array): number {
 
 function toProposal(ctx: Context, layout: Layout, slots: Int32Array, downgraded: Id[]): Proposal {
   const breakdown = {} as Breakdown;
-  const cost = evaluate(ctx, layout, slots, breakdown);
+  const violations = {} as Violations;
+  const cost = evaluate(ctx, layout, slots, breakdown, violations);
   const matches = layout.plan.map((c, k) => {
     const o = layout.offsets[k];
     const half = c.kind === 'doubles' ? 2 : 1;
@@ -283,28 +353,29 @@ function toProposal(ctx: Context, layout: Layout, slots: Int32Array, downgraded:
   });
   const benchSet = new Set(Array.from(slots.slice(layout.playing)));
   const sittingOut = ctx.ids.filter((_, i) => benchSet.has(i));
-  return { matches, sittingOut, downgraded, cost, breakdown };
+  return { matches, sittingOut, downgraded, cost, breakdown, violations };
 }
 
 export function generateRound(req: ScheduleRequest): Proposal {
   const ctx = buildContext(req);
   const plans: CourtPlan[] = planLayout(ctx.n, req.courts, req.settings.fillOrder, req.settings.shortDoubles);
   const layout = layoutFrom(plans);
+  const bench = benchFor(ctx, ctx.n - layout.playing);
   const downgraded = plans.filter((p) => p.downgraded).map((p) => p.courtId);
   const rand = rng(req.seed);
-  if (layout.playing === 0) return toProposal(ctx, layout, initial(ctx, layout, rand), downgraded);
+  if (layout.playing === 0) return toProposal(ctx, layout, initial(ctx, layout, bench, rand), downgraded);
 
   let best: Int32Array | null = null;
   let bestCost = Infinity;
   for (let r = 0; r < RESTARTS; r++) {
-    const slots = initial(ctx, layout, rand);
-    const cost = anneal(ctx, layout, slots, rand);
+    const slots = initial(ctx, layout, bench, rand);
+    const cost = anneal(ctx, layout, bench, slots, rand);
     if (cost < bestCost) {
       bestCost = cost;
       best = slots;
     }
   }
-  hillClimb(ctx, layout, best!);
+  hillClimb(ctx, layout, bench, best!);
   return toProposal(ctx, layout, best!, downgraded);
 }
 
@@ -312,61 +383,79 @@ export function generateRound(req: ScheduleRequest): Proposal {
 export function evaluateRound(
   req: Omit<ScheduleRequest, 'seed'>,
   round: { matches: ProposedMatch[]; sittingOut: Id[] },
-): { cost: number; breakdown: Breakdown } {
+): { cost: number; breakdown: Breakdown; violations: Violations } {
   const ctx = buildContext({ ...req, seed: 0 });
   const index = new Map(ctx.ids.map((id, i) => [id, i]));
   const layout = layoutFrom(round.matches);
   const ids = [...round.matches.flatMap((m) => [...m.sideA, ...m.sideB]), ...round.sittingOut];
   const slots = Int32Array.from(ids.map((id) => index.get(id) ?? -1).filter((i) => i >= 0));
   const breakdown = {} as Breakdown;
-  if (slots.length < layout.playing) return { cost: Infinity, breakdown };
-  return { cost: evaluate(ctx, layout, slots, breakdown), breakdown };
+  const violations = {} as Violations;
+  if (slots.length < layout.playing) return { cost: Infinity, breakdown, violations };
+  return { cost: evaluate(ctx, layout, slots, breakdown, violations), breakdown, violations };
 }
 
-/** Per-player reasons a round is less than ideal, for preview warnings. */
-export function roundWarnings(req: Omit<ScheduleRequest, 'seed'>, round: { matches: ProposedMatch[]; sittingOut: Id[] }): { playerId: Id; reason: string }[] {
+/** Per-player reasons a round is less than ideal, for preview warnings (e.g. after manual swaps). */
+export function roundWarnings(
+  req: Omit<ScheduleRequest, 'seed'>,
+  round: { matches: ProposedMatch[]; sittingOut: Id[] },
+): { playerId: Id; reason: string }[] {
   const ctx = buildContext({ ...req, seed: 0 });
   const index = new Map(ctx.ids.map((id, i) => [id, i]));
   const out: { playerId: Id; reason: string }[] = [];
-  const minEffPlaying = Math.min(
-    ...round.matches.flatMap((m) => [...m.sideA, ...m.sideB]).map((id) => ctx.eff[index.get(id) ?? 0]),
-  );
+  const onCourt = round.matches.flatMap((m) => [...m.sideA, ...m.sideB]);
+  const benchSet = new Set(round.sittingOut);
+  // Sit-outs after this round; flag sitters who would end up 2+ ahead of someone present.
+  const after = ctx.ids.map((id, i) => ctx.sits[i] + (benchSet.has(id) ? 1 : 0));
+  const minAfter = after.length ? Math.min(...after) : 0;
+  const minEffPlaying = Math.min(...onCourt.map((id) => ctx.eff[index.get(id) ?? 0]));
   for (const id of round.sittingOut) {
     const i = index.get(id);
     if (i === undefined) continue;
-    if (ctx.satOutLast[i]) out.push({ playerId: id, reason: 'sat out last round too' });
+    if (after[i] - minAfter > 1) out.push({ playerId: id, reason: 'would sit out 2 more than someone else' });
+    else if (ctx.satOutLast[i]) out.push({ playerId: id, reason: 'sat out last round too' });
     else if (ctx.playNext[i]) out.push({ playerId: id, reason: 'just arrived — should play' });
     else if (ctx.eff[i] < minEffPlaying) out.push({ playerId: id, reason: 'has played fewer games' });
   }
   for (const m of round.matches) {
-    if (m.kind === 'singles')
-      for (const id of [...m.sideA, ...m.sideB]) {
-        const i = index.get(id);
-        if (i !== undefined && ctx.singlesLast[i]) out.push({ playerId: id, reason: 'singles two rounds running' });
+    if (m.kind === 'singles') {
+      const [a, b] = [index.get(m.sideA[0]), index.get(m.sideB[0])];
+      for (const [id, i] of [
+        [m.sideA[0], a],
+        [m.sideB[0], b],
+      ] as const) {
+        if (i === undefined) continue;
+        if (ctx.singlesLast[i]) out.push({ playerId: id, reason: 'singles two rounds running' });
+        if (ctx.singles[i] > ctx.minSingles) out.push({ playerId: id, reason: "second singles while someone hasn't had one" });
       }
+      if (a !== undefined && b !== undefined && ctx.singlesOpp[a * ctx.n + b] > 0) out.push({ playerId: m.sideA[0], reason: 'repeat singles match' });
+    }
     for (const side of [m.sideA, m.sideB])
       if (side.length === 2) {
         const [a, b] = side.map((id) => index.get(id));
-        if (a !== undefined && b !== undefined && ctx.partner[a * ctx.n + b] > 0)
-          out.push({ playerId: side[0], reason: `repeat partner` });
+        if (a !== undefined && b !== undefined && ctx.partner[a * ctx.n + b] > 0) out.push({ playerId: side[0], reason: 'repeat partner' });
       }
   }
   return out;
 }
 
-/**
- * Games credit for a player being (re)activated so they join at par: their effective games
- * become the minimum among the other active players (never lowered).
- */
-export function activationCredit(players: Player[], history: Round[], id: Id): number {
+/** (Re)activation credits: games up to the field's lowest (join at par); sit-outs up to the
+ *  field's highest, so they're first to play while staying inside the one-sit-out spread. */
+export function activationCredit(players: Player[], history: Round[], id: Id): { games: number; sits: number } {
   const appearances = new Map<Id, number>();
-  for (const r of played(history))
-    for (const m of r.matches)
-      for (const pid of [...m.sideA, ...m.sideB]) appearances.set(pid, (appearances.get(pid) ?? 0) + 1);
+  const sitOuts = new Map<Id, number>();
+  for (const r of played(history)) {
+    for (const m of r.matches) for (const pid of [...m.sideA, ...m.sideB]) appearances.set(pid, (appearances.get(pid) ?? 0) + 1);
+    for (const pid of r.sittingOut) sitOuts.set(pid, (sitOuts.get(pid) ?? 0) + 1);
+  }
   const me = players.find((p) => p.id === id);
-  if (!me) return 0;
-  const others = players.filter((p) => p.active && p.id !== id).map((p) => (appearances.get(p.id) ?? 0) + p.gamesCredit);
-  if (!others.length) return me.gamesCredit;
-  const mine = appearances.get(id) ?? 0;
-  return Math.max(me.gamesCredit, Math.min(...others) - mine);
+  if (!me) return { games: 0, sits: 0 };
+  const others = players.filter((p) => p.active && p.id !== id);
+  if (!others.length) return { games: me.gamesCredit, sits: me.sitCredit ?? 0 };
+  const games = Math.min(...others.map((p) => (appearances.get(p.id) ?? 0) + p.gamesCredit));
+  const sits = Math.max(...others.map((p) => (sitOuts.get(p.id) ?? 0) + (p.sitCredit ?? 0)));
+  return {
+    games: Math.max(me.gamesCredit, games - (appearances.get(id) ?? 0)),
+    sits: Math.max(me.sitCredit ?? 0, sits - (sitOuts.get(id) ?? 0)),
+  };
 }
