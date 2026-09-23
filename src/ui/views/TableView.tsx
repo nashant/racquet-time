@@ -1,7 +1,11 @@
+import { useState } from 'preact/hooks';
 import { computeStandings, ordinal, unresolvedTies, type Standings } from '../../domain/ranking';
 import type { Session } from '../../domain/types';
 import { go, useNames, useSession } from '../context';
 import { pct, signed, TIEBREAKER_LABEL } from '../labels';
+import { downloadBlob } from '../components';
+import { leaderboardPng } from '../leaderboardImage';
+import { slug } from '../labels';
 
 export function standingsOf(s: Session): Standings {
   return computeStandings(s.players, s.rounds, s.settings.tiebreakers, s.playoffs);
@@ -31,12 +35,48 @@ export function TableView() {
   const st = standingsOf(s);
   const open = unresolvedTies(st);
   const inPlay = st.ties.filter((t) => t.inProgress).length;
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
+  const [ready, setReady] = useState<File | null>(null);
+
+  // Opens the device's own share sheet with a PNG of the table; downloads it where sharing files
+  // isn't supported. If drawing took too long for the browser to allow sharing, keep the image so
+  // a second tap shares it instantly.
+  const share = async () => {
+    setShareStatus(null);
+    try {
+      const file = ready ?? new File([await leaderboardPng(s)], `${slug(s.name)}-leaderboard.png`, { type: 'image/png' });
+      if (!navigator.canShare?.({ files: [file] })) {
+        downloadBlob(file.name, file);
+        setShareStatus('This browser can’t share images, so it was downloaded instead.');
+        return;
+      }
+      try {
+        await navigator.share({ files: [file], title: `${s.name} leaderboard` });
+        setReady(null);
+      } catch (e) {
+        const err = (e as DOMException).name;
+        if (err === 'NotAllowedError') {
+          setReady(file);
+          setShareStatus('Image ready — tap Share again.');
+        } else if (err !== 'AbortError') setShareStatus('Sharing didn’t work on this device. Try again.');
+      }
+    } catch {
+      setShareStatus('Couldn’t create the image. Try again.');
+    }
+  };
   return (
     <>
       <div class="page-head">
         <h2>Leaderboard</h2>
-        <span class="eyebrow">Live</span>
+        <button class="btn" onClick={share} disabled={!st.rows.some((r) => r.position !== null)}>
+          Share
+        </button>
       </div>
+      {shareStatus && (
+        <p class="small muted" role="status">
+          {shareStatus}
+        </p>
+      )}
       <StaleBanner />
       {open.length > 0 && (
         <div class="panel row spread" style="flex-direction:row">

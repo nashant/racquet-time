@@ -145,7 +145,11 @@ export function Icon({ name }: { name: keyof typeof paths }) {
 }
 
 export function download(filename: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+  downloadBlob(filename, new Blob([text], { type: 'application/json' }));
+}
+
+export function downloadBlob(filename: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   a.download = filename;
