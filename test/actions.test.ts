@@ -89,6 +89,27 @@ describe('session actions', () => {
     expect(A.liveRound(s)!.matches[0].score).toEqual({ a: 5, b: 1 });
   });
 
+  it('clearing all rounds keeps players, courts and settings and starts the rotation afresh', () => {
+    let s = started(['A', 'B', 'C', 'D', 'E', 'F', 'G'], 3);
+    s = A.addPlayers(s, ['Late']);
+    s = A.setActive(s, idOf(s, 'Late'), false);
+    const ties = unresolvedTies(computeStandings(s.players, s.rounds, s.settings.tiebreakers, s.playoffs));
+    if (ties.length) s = A.createPlayoffs(s, ties, 1, 1);
+    s = A.updateSettings(s, { allowDraws: true });
+    s = A.generatePreview(s, 9);
+
+    const cleared = A.clearRounds(s);
+    expect(cleared.rounds).toEqual([]);
+    expect(cleared.playoffs).toEqual([]);
+    expect(cleared.players.map((p) => [p.id, p.name, p.active])).toEqual(s.players.map((p) => [p.id, p.name, p.active]));
+    expect(cleared.players.every((p) => p.gamesCredit === 0 && p.sitCredit === 0 && !p.playNext)).toBe(true);
+    expect(cleared.courts).toEqual(s.courts);
+    expect(cleared.settings).toEqual(s.settings);
+    expect(computeStandings(cleared.players, cleared.rounds, cleared.settings.tiebreakers, cleared.playoffs).rows.every((r) => r.position === null)).toBe(true);
+    // 7 active players on 1D+1S again: the next round is a fresh rotation.
+    expect(A.preview(A.generatePreview(cleared, 1))!.rotation?.step).toBe(0);
+  });
+
   it('rejects draws unless enabled', () => {
     expect(A.scoreProblem({ a: 10, b: 10 }, false)).toMatch(/golden point/);
     expect(A.scoreProblem({ a: 10, b: 10 }, true)).toBeNull();

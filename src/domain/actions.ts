@@ -268,6 +268,16 @@ export function endRound(s: Session, now: number): Session {
   return schedulePlayoffs(mapRound(paused, r.id, (x) => ({ ...x, status: 'done' })));
 }
 
+/** Clears every round and playoff but keeps players, courts and settings, ready for a fresh start. */
+export function clearRounds(s: Session): Session {
+  return {
+    ...s,
+    rounds: [],
+    playoffs: [],
+    players: s.players.map((p) => ({ ...p, gamesCredit: 0, sitCredit: 0, playNext: false })),
+  };
+}
+
 export function deleteRound(s: Session, roundId: Id): Session {
   return schedulePlayoffs({ ...s, rounds: s.rounds.filter((r) => r.id !== roundId) });
 }

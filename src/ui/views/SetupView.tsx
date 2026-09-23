@@ -301,6 +301,7 @@ function DataCard() {
   const s = useSession();
   const prefs = store.get().prefs;
   const rescue = readRescue(localStorageOrNull());
+  const playedRounds = s.rounds.filter((r) => r.status !== 'preview').length;
   const doImport = async () => {
     const file = await pickFile('application/json,.json');
     if (!file) return;
@@ -338,6 +339,15 @@ function DataCard() {
           Import JSON
         </button>
       </div>
+      <h3>Start over</h3>
+      <p class="small muted">Clears every round, score and playoff but keeps the players, courts and settings. You can Undo.</p>
+      <ConfirmButton
+        class="btn danger block"
+        label="Clear all rounds & history"
+        confirmLabel={`Tap again — deletes ${playedRounds} round${playedRounds === 1 ? '' : 's'}${s.playoffs.length ? ' and playoffs' : ''}`}
+        disabled={!s.rounds.length && !s.playoffs.length}
+        onConfirm={() => store.commit(A.clearRounds)}
+      />
       <ConfirmButton
         class="btn danger block"
         label="Start a new session"
