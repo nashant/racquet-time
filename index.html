@@ -15,6 +15,43 @@
   <body>
     <div id="app"></div>
     <noscript>Racquet Time needs JavaScript.</noscript>
+    <script>
+      // If an app file fails to load but the server is reachable, this offline copy is stale: drop
+      // it and reload once. If the server can't be reached we're offline, so leave everything alone.
+      // Saved sessions live in localStorage and are never touched.
+      (function () {
+        function recover() {
+          try {
+            if (sessionStorage.getItem('rt-recovered')) return;
+            sessionStorage.setItem('rt-recovered', '1');
+          } catch (err) {
+            return;
+          }
+          var sw = navigator.serviceWorker
+            ? navigator.serviceWorker.getRegistrations().then(function (rs) {
+                return Promise.all(rs.map(function (r) { return r.unregister(); }));
+              })
+            : Promise.resolve();
+          var cached = self.caches
+            ? caches.keys().then(function (ks) {
+                return Promise.all(ks.filter(function (k) { return k.indexOf('racquet-time-') === 0; }).map(function (k) { return caches.delete(k); }));
+              })
+            : Promise.resolve();
+          Promise.all([sw, cached]).then(function () { location.reload(); });
+        }
+        addEventListener(
+          'error',
+          function (e) {
+            var t = e.target;
+            if (!t || (t.tagName !== 'SCRIPT' && t.tagName !== 'LINK')) return;
+            fetch('/manifest.webmanifest?probe=' + Date.now(), { cache: 'no-store' })
+              .then(function (res) { if (res.ok) recover(); })
+              .catch(function () {});
+          },
+          true,
+        );
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

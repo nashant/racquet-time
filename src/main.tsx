@@ -17,6 +17,13 @@ function storage(): Storage {
 const store = createStore(storage());
 render(<App store={store} />, document.getElementById('app')!);
 
+// The app loaded, so any earlier stale-copy recovery (see index.html) worked; allow it again later.
+try {
+  sessionStorage.removeItem('rt-recovered');
+} catch {
+  // Storage blocked; the recovery guard just stays set for this tab.
+}
+
 // Ask the browser not to evict our data under storage pressure.
 void navigator.storage?.persist?.();
 
