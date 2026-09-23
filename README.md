@@ -37,6 +37,7 @@ src/domain/     pure logic, no DOM — everything here is unit-tested
   types.ts        state shape (Session, Round, Match, Playoff, …)
   layout.ts       which courts run, and as what, for N players
   scheduler.ts    round generator (cost function + search)
+  rotation.ts     fixed one-place-along rotation for 7 players on 1D+1S
   stats.ts        per-player statistics from match history
   ranking.ts      tiebreakers, tie detection, playoff overlay, staleness
   playoffs.ts     brackets, progression, court assignment
@@ -85,6 +86,14 @@ These can conflict in bigger groups. For 7 players on 1 doubles + 1 singles cour
 Weights come from the priority order (reorderable under **Setup → Advanced**): the i-th of six priorities gets `6^(5−i)`, so higher priorities dominate almost lexicographically.
 
 **Search:** 24 random restarts. Each restart fills the bench as the sit-out rule requires, picking among interchangeable players by lowest sit-out cost with random tie-breaks, shuffles everyone else onto court, and runs 1,500 steps of simulated annealing. Each step swaps two slots, which covers moves between courts, between teammates and opponents, and between singles and doubles. A swap with the bench is allowed only between two interchangeable players. The best result then gets an exhaustive pairwise-swap hill-climb. All randomness comes from a seeded PRNG, so the same seed and history always give the same round. The iteration budget is fixed rather than time-based, to keep that determinism. A 30-player, 8-court round takes about 20 ms, and the tests assert it stays under 200 ms. The near-hard rules are checked round by round, so a session can't be planned ahead; in exhaustive checks on 8–10 players, every round the scheduler produced had the fewest rule-breaks possible given the rounds before it.
+
+**Fixed rotation (7 players, 1 doubles + 1 singles).** For this group the app doesn't search at all. Round 1 draws a random order around a circle of seven positions, and each round everyone moves one place along (`src/domain/rotation.ts`):
+
+| Court 1 side A | Court 1 side B | Singles | Sits out |
+|---|---|---|---|
+| positions 0, 1 | 2, 4 | 3 v 6 | 5 |
+
+The two doubles teams have different gaps round the circle (1 and 2), so no team ever repeats. The singles positions are 3 apart, so nobody plays singles twice running. The single bench seat means everyone sits out exactly once every 7 rounds. Singles matches never repeat either. An exhaustive search found 2,016 of the 5,040 possible layouts meet every rule over 6 rounds; this one also has the fewest repeat opponents over 6 rounds (7, against 8 from the scheduler). The rotation runs for up to 7 rounds; round 8 would exactly repeat round 1, so the scheduler takes over from there. It also takes over for the rest of the session after a manual swap, a roster change, or choosing **Plan without rotation**.
 
 **Late arrivals and withdrawals:** a player added or re-activated mid-session is credited with the lowest games count among active players, so they join level instead of playing every round to catch up. Their sit-outs are credited up to the highest count among active players, so they're first in line to play without breaking the within-1 rule. They are also flagged to play next. A player who withdraws mid-round (tap their name) keeps their current score, and later rounds are planned without them.
 

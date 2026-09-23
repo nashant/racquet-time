@@ -1,6 +1,7 @@
 // Pure session transitions. Each returns a new Session; the store persists and records undo.
 import { allMatches, assignCourts, createPlayoff, redraw, setPlayoffScore, setProgress, startPlayoff } from './playoffs';
 import { computeStandings, type TieGroup } from './ranking';
+import { nextRotationRound } from './rotation';
 import { activationCredit, generateRound } from './scheduler';
 import { computeStats, strengths } from './stats';
 import { defaultSettings, type Court, type CourtKind, type Id, type Round, type Score, type Session, type Settings } from './types';
@@ -38,7 +39,8 @@ function mapRound(s: Session, id: Id, fn: (r: Round) => Round): Session {
 /** Rebuilds the preview (if any) after the roster, courts or settings change. */
 function refreshPreview(s: Session): Session {
   const p = preview(s);
-  return p ? generatePreview(s, p.seed) : s;
+  // Don't bring a rotation back if this preview was deliberately planned without one.
+  return p ? generatePreview(s, p.seed, { rotation: !!p.rotation || !hasStarted(s) }) : s;
 }
 
 export function renameSession(s: Session, name: string, date: string): Session {
@@ -126,9 +128,26 @@ export function updateSettings(s: Session, patch: Partial<Settings>): Session {
   return SCHEDULER_KEYS.some((k) => k in patch) ? refreshPreview(next) : next;
 }
 
-export function generatePreview(s: Session, seed: number): Session {
+/**
+ * Plans the next round. A fixed rotation is used while one fits (see rotation.ts); pass
+ * `rotation: false` to plan with the scheduler instead, which ends the rotation.
+ */
+export function generatePreview(s: Session, seed: number, opts: { rotation?: boolean } = {}): Session {
   if (liveRound(s)) return s;
   const history = s.rounds.filter((r) => r.status !== 'preview');
+  const rotated = opts.rotation === false ? null : nextRotationRound(s.players, s.courts, history, seed);
+  if (rotated) {
+    const round: Round = {
+      id: preview(s)?.id ?? uid(),
+      status: 'preview',
+      seed,
+      matches: rotated.matches.map((m) => ({ ...m, id: uid(), score: null })),
+      sittingOut: rotated.sittingOut,
+      timer: null,
+      rotation: rotated.rotation,
+    };
+    return { ...s, rounds: [...history, round] };
+  }
   const proposal = generateRound({
     players: s.players,
     courts: s.courts,
@@ -157,10 +176,12 @@ export function swapPlayers(s: Session, a: Id, b: Id): Session {
   const p = preview(s);
   if (!p || a === b) return s;
   const sw = (id: Id) => (id === a ? b : id === b ? a : id);
+  // A hand-edited round no longer follows the rotation, so later rounds go to the scheduler.
   return mapRound(s, p.id, (r) => ({
     ...r,
     matches: r.matches.map((m) => ({ ...m, sideA: m.sideA.map(sw), sideB: m.sideB.map(sw) })),
     sittingOut: r.sittingOut.map(sw),
+    rotation: null,
   }));
 }
 

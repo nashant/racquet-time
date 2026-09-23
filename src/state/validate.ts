@@ -75,6 +75,7 @@ const session: Check = obj({
       matches: arr(obj({ id: str, courtId: str, kind: oneOf('singles', 'doubles'), sideA: arr(str), sideB: arr(str), score })),
       sittingOut: arr(str),
       timer: nullable(obj({ durationMs: num, runningSince: nullable(num), accumulatedMs: num, alerted: bool })),
+      rotation: optional(nullable(obj({ order: arr(str), step: num }))),
     }),
   ),
   playoffs: arr(playoff),

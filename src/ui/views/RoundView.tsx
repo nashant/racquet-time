@@ -3,6 +3,7 @@ import { useEffect, useState } from 'preact/hooks';
 import * as A from '../../domain/actions';
 import { allMatches } from '../../domain/playoffs';
 import { randomSeed } from '../../domain/rng';
+import { rotationLength } from '../../domain/rotation';
 import { roundWarnings } from '../../domain/scheduler';
 import type { Id, Match, Round, Score, Session } from '../../domain/types';
 import { beep, keepAwake, unlockAudio, vibrate } from '../alert';
@@ -90,6 +91,8 @@ function Preview({ round }: { round: Round }) {
   const history = s.rounds.filter((r) => r.status !== 'preview');
   const warnings = roundWarnings({ players: s.players, courts: s.courts, history, settings: s.settings }, round);
   const unused = s.courts.filter((c) => !round.matches.some((m) => m.courtId === c.id));
+  const rotation = round.rotation;
+  const cycle = rotation ? rotationLength(s.players.filter((p) => p.active).length, s.courts) : null;
 
   const tap = (id: Id) => {
     if (selected === null) setSelected(id);
@@ -116,10 +119,21 @@ function Preview({ round }: { round: Round }) {
     <>
       <div class="page-head">
         <h2>Round {roundNumber(s)}</h2>
-        <span class="eyebrow">Preview</span>
+        <span class="eyebrow">{rotation ? `Rotation · ${rotation.step + 1} of ${cycle}` : 'Preview'}</span>
       </div>
+      {rotation && (
+        <p class="muted small">
+          {rotation.step === 0
+            ? 'Everyone moves one place along each round, so no team or singles match repeats and everyone sits out once.'
+            : 'Everyone has moved one place along from last round.'}
+        </p>
+      )}
       <p class="muted" aria-live="polite">
-        {selected ? `Now tap who ${name(selected)} should swap with.` : 'Tap two players to swap them — including anyone sitting out.'}
+        {selected
+          ? `Now tap who ${name(selected)} should swap with.`
+          : rotation
+            ? 'Tap two players to swap them. Swapping ends the rotation; later rounds are then planned to stay fair.'
+            : 'Tap two players to swap them — including anyone sitting out.'}
       </p>
       {round.matches.map((m) => (
         <CourtCard key={m.id} title={courtName(m.courtId)} kind={kindLabel(s, m)} a={m.sideA.map(chip)} b={m.sideB.map(chip)} />
@@ -133,9 +147,18 @@ function Preview({ round }: { round: Round }) {
         Start round
       </button>
       <div class="row">
-        <button class="btn grow" onClick={() => store.commit((x) => A.generatePreview(x, randomSeed()))}>
-          Regenerate
-        </button>
+        {rotation && rotation.step > 0 ? (
+          <ConfirmButton
+            class="btn grow"
+            label="Plan without rotation"
+            confirmLabel="Tap again — ends the rotation"
+            onConfirm={() => store.commit((x) => A.generatePreview(x, randomSeed(), { rotation: false }))}
+          />
+        ) : (
+          <button class="btn grow" onClick={() => store.commit((x) => A.generatePreview(x, randomSeed()))}>
+            {rotation ? 'Re-draw order' : 'Regenerate'}
+          </button>
+        )}
         <button class="btn grow" onClick={() => store.commit(A.discardPreview)}>
           Discard
         </button>

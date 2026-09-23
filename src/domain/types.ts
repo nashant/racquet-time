@@ -83,6 +83,13 @@ export interface Timer {
 
 export type RoundStatus = 'preview' | 'live' | 'done';
 
+export interface RotationInfo {
+  /** Player at each circle position in the first rotation round. */
+  order: Id[];
+  /** 0 for the first rotation round, then +1 per round. */
+  step: number;
+}
+
 export interface Round {
   id: Id;
   status: RoundStatus;
@@ -90,6 +97,8 @@ export interface Round {
   matches: Match[];
   sittingOut: Id[];
   timer: Timer | null;
+  /** Set when the round came from a fixed rotation (see rotation.ts) and hasn't been edited. */
+  rotation?: RotationInfo | null;
 }
 
 export type Source =
