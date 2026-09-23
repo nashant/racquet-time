@@ -110,6 +110,77 @@ describe('session actions', () => {
     expect(A.preview(A.generatePreview(cleared, 1))!.rotation?.step).toBe(0);
   });
 
+  describe('editing a finished round\'s players', () => {
+    function oneRound() {
+      let s = A.addPlayers(A.newSession('t', 'd'), ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'Sub']);
+      s = A.setActive(s, idOf(s, 'Sub'), false);
+      s = A.generatePreview(s, 1);
+      s = A.startRound(s);
+      const r = A.liveRound(s)!;
+      r.matches.forEach((m, i) => (s = A.setMatchScore(s, r.id, m.id, { a: 21, b: 10 + i })));
+      return A.endRound(s, 0);
+    }
+    const stats = (s: Session) => new Map(computeStandings(s.players, s.rounds, s.settings.tiebreakers, s.playoffs).rows.map((r) => [r.playerId, r.stats]));
+
+    it('swaps a player on court with one who sat out, moving the score credit with the slot', () => {
+      let s = oneRound();
+      const r = s.rounds[0];
+      const winner = r.matches[0].sideA[0];
+      const sitter = r.sittingOut[0];
+      s = A.swapInRound(s, r.id, winner, sitter);
+      const after = s.rounds[0];
+      expect(after.matches[0].sideA[0]).toBe(sitter);
+      expect(after.sittingOut).toEqual([winner]);
+      expect(after.matches[0].score).toEqual(r.matches[0].score);
+      expect(stats(s).get(sitter)!.wins).toBe(1);
+      expect(stats(s).get(winner)!.matchesPlayed).toBe(0);
+    });
+
+    it('swaps players between courts and sides', () => {
+      let s = oneRound();
+      const r = s.rounds[0];
+      const [d, sg] = [r.matches.find((m) => m.kind === 'doubles')!, r.matches.find((m) => m.kind === 'singles')!];
+      s = A.swapInRound(s, r.id, d.sideB[1], sg.sideA[0]);
+      const after = s.rounds[0];
+      expect(after.matches.find((m) => m.kind === 'doubles')!.sideB[1]).toBe(sg.sideA[0]);
+      expect(after.matches.find((m) => m.kind === 'singles')!.sideA[0]).toBe(d.sideB[1]);
+    });
+
+    it('brings in someone who was not in the round, taking the replaced player out of it', () => {
+      let s = oneRound();
+      const r = s.rounds[0];
+      const injured = r.matches[0].sideB[0];
+      const sub = idOf(s, 'Sub');
+      s = A.swapInRound(s, r.id, injured, sub);
+      const after = s.rounds[0];
+      const everyone = [...after.matches.flatMap((m) => [...m.sideA, ...m.sideB]), ...after.sittingOut];
+      expect(everyone).toContain(sub);
+      expect(everyone).not.toContain(injured);
+      expect(new Set(everyone).size).toBe(everyone.length);
+      expect(stats(s).get(sub)!.matchesPlayed).toBe(1);
+      expect(stats(s).get(injured)!.matchesPlayed).toBe(0);
+    });
+
+    it('ignores swaps between two people who were both outside the round', () => {
+      let s = oneRound();
+      s = A.addPlayers(s, ['Other']);
+      s = A.setActive(s, idOf(s, 'Other'), false);
+      expect(A.swapInRound(s, s.rounds[0].id, idOf(s, 'Sub'), idOf(s, 'Other'))).toBe(s);
+    });
+
+    it('ends a fixed rotation, so later rounds are planned from the edited history', () => {
+      let s = A.addPlayers(A.newSession('t', 'd'), ['A', 'B', 'C', 'D', 'E', 'F', 'G']);
+      s = A.generatePreview(s, 1);
+      s = A.startRound(s);
+      s = A.endRound(s, 0);
+      expect(s.rounds[0].rotation?.step).toBe(0);
+      const r = s.rounds[0];
+      s = A.swapInRound(s, r.id, r.matches[0].sideA[0], r.sittingOut[0]);
+      expect(s.rounds[0].rotation).toBeNull();
+      expect(A.preview(A.generatePreview(s, 2))!.rotation ?? null).toBeNull();
+    });
+  });
+
   it('rejects draws unless enabled', () => {
     expect(A.scoreProblem({ a: 10, b: 10 }, false)).toMatch(/golden point/);
     expect(A.scoreProblem({ a: 10, b: 10 }, true)).toBeNull();

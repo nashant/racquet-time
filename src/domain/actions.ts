@@ -174,15 +174,31 @@ export function discardPreview(s: Session): Session {
 /** Swaps two players' places in the preview (either may be sitting out). */
 export function swapPlayers(s: Session, a: Id, b: Id): Session {
   const p = preview(s);
-  if (!p || a === b) return s;
+  return p ? swapInRound(s, p.id, a, b) : s;
+}
+
+const roundPlayers = (r: Round): Id[] => [...r.matches.flatMap((m) => [...m.sideA, ...m.sideB]), ...r.sittingOut];
+
+/**
+ * Swaps two players' places in any round (preview, live or finished). If one of them wasn't in
+ * the round, they take the other's place and the other leaves the round (e.g. an injury
+ * substitute). Scores stay with the court and side.
+ */
+export function swapInRound(s: Session, roundId: Id, a: Id, b: Id): Session {
+  const round = s.rounds.find((r) => r.id === roundId);
+  if (!round || a === b) return s;
+  const inRound = new Set(roundPlayers(round));
+  if (!inRound.has(a) && !inRound.has(b)) return s;
+  if (![a, b].every((id) => s.players.some((p) => p.id === id))) return s;
   const sw = (id: Id) => (id === a ? b : id === b ? a : id);
   // A hand-edited round no longer follows the rotation, so later rounds go to the scheduler.
-  return mapRound(s, p.id, (r) => ({
+  const next = mapRound(s, roundId, (r) => ({
     ...r,
     matches: r.matches.map((m) => ({ ...m, sideA: m.sideA.map(sw), sideB: m.sideB.map(sw) })),
     sittingOut: r.sittingOut.map(sw),
     rotation: null,
   }));
+  return round.status === 'preview' ? next : schedulePlayoffs(next);
 }
 
 export function startRound(s: Session): Session {
